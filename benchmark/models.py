@@ -81,6 +81,10 @@ class BenchmarkConfig:
     max_tokens: int = 4096
     reset_database_between_runs: bool = True
 
+    # Multi-turn user-scenario instructions (multiturn_react orchestrator).
+    # Expected keys: domain, reason_for_call, known_info, task_instructions.
+    scenario: Optional[Dict[str, str]] = None
+
 
 @dataclass
 class LLMConfig:

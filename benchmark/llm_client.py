@@ -52,15 +52,22 @@ class LLMClient:
                     max_tokens=self.max_tokens,
                 )
             elif self.provider == "aws_bedrock":
-                from langchain_aws import ChatBedrock
+                # ChatBedrockConverse uses the Bedrock Converse API which
+                # natively supports the tool_use channel. The legacy ChatBedrock
+                # class uses InvokeModel which does NOT bridge bind_tools to
+                # Bedrock's tool spec — it forces models to fake tool calls as
+                # `<function_calls>` XML in plain text (tool_calls=[] in the
+                # response). Use Converse for any tool-bearing workflow.
+                from langchain_aws import ChatBedrockConverse
+                from langchain_core.caches import BaseCache  # noqa: F401
+                from langchain_core.callbacks import Callbacks  # noqa: F401
+                ChatBedrockConverse.model_rebuild()
 
-                self.llm = ChatBedrock(
-                    model_id=self.model,
+                self.llm = ChatBedrockConverse(
+                    model=self.model,
                     region_name=self.region or "us-west-2",
-                    model_kwargs={
-                        "temperature": self.temperature,
-                        "max_tokens": self.max_tokens,
-                    },
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
                 )
             elif self.provider == "openai":
                 from langchain_openai import ChatOpenAI

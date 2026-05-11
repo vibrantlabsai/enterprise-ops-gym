@@ -36,11 +36,13 @@ from utils.task_queue_worker import TaskQueueWorker
 from orchestrators.react import ReactOrchestrator
 from orchestrators.planner_react import PlannerReactOrchestrator
 from orchestrators.decomposing_planner import DecomposingPlannerOrchestrator
+from orchestrators.multiturn_react import MultiTurnReactOrchestrator
 
 ORCHESTRATOR_MAP = {
     "react": ReactOrchestrator,
     "planner_react": PlannerReactOrchestrator,
     "decomposing": DecomposingPlannerOrchestrator,
+    "multiturn_react": MultiTurnReactOrchestrator,
 }
 
 # Set up logging
@@ -188,7 +190,9 @@ def load_config(config_path: str = "config.json") -> BenchmarkConfig:
 
 async def execute_sample(
     config_file, llm_config, output_folder,
-    orchestrator="react", planner_llm_config=None, max_num_attempts=5
+    orchestrator="react", planner_llm_config=None,
+    user_simulator_llm_config=None, max_user_turns=20,
+    max_num_attempts=5,
 ):
     if skip_sample(config_file, output_folder):
         print(f"Skipping already processed config: {config_file}")
@@ -209,6 +213,15 @@ async def execute_sample(
         orchestrator_kwargs["planner_llm_config"] = random.choice(
             load_llm_configs(planner_llm_config)
         )
+    if orchestrator == "multiturn_react":
+        if user_simulator_llm_config is None:
+            raise ValueError(
+                "--user_simulator_llm_config is required when --orchestrator=multiturn_react"
+            )
+        orchestrator_kwargs["user_simulator_llm_config"] = random.choice(
+            load_llm_configs(user_simulator_llm_config)
+        )
+        orchestrator_kwargs["max_user_turns"] = int(max_user_turns)
 
     executor = BenchmarkExecutor(
         config,
@@ -264,7 +277,7 @@ async def main():
         "--orchestrator",
         type=str,
         default="react",
-        choices=["react", "planner_react", "decomposing"],
+        choices=["react", "planner_react", "decomposing", "multiturn_react"],
         help="Orchestration strategy.",
     )
     parser.add_argument(
@@ -272,6 +285,21 @@ async def main():
         type=str,
         default=None,
         help="Path to LLM config for the planner (required for planner_react and decomposing).",
+    )
+    parser.add_argument(
+        "--user_simulator_llm_config",
+        type=str,
+        default=None,
+        help=(
+            "Path to LLM config for the user simulator (required for multiturn_react). "
+            "Use a small/cheap model — the user side is roleplay, not reasoning-heavy."
+        ),
+    )
+    parser.add_argument(
+        "--max_user_turns",
+        type=int,
+        default=20,
+        help="Cap on agent->user round-trips per task (multiturn_react only).",
     )
     args = parser.parse_args()
 
@@ -283,7 +311,7 @@ async def main():
         domains = args.domain
         modes = args.mode
         tmp_dir = tempfile.mkdtemp(prefix="rl_gym_hf_")
-        json_string_fields = {"gym_servers_config", "verifiers"}
+        json_string_fields = {"gym_servers_config", "verifiers", "scenario"}
         hf_only_fields = {"task_id", "domain"}
         total_written = 0
         for mode in modes:
@@ -323,6 +351,8 @@ async def main():
                 cfg, args.llm_config, output_folder,
                 orchestrator=args.orchestrator,
                 planner_llm_config=args.planner_llm_config,
+                user_simulator_llm_config=args.user_simulator_llm_config,
+                max_user_turns=args.max_user_turns,
             ),
             concurrency=int(args.concurrency),
         )

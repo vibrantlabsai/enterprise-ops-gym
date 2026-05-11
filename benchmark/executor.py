@@ -132,6 +132,25 @@ class BenchmarkExecutor:
             self._initialize_planner_llm(planner_llm_config)
             self.orchestrator_kwargs["planner_llm_client"] = self.planner_llm_client
 
+        # If orchestrator_kwargs contains a user_simulator_llm_config (multiturn_react),
+        # build the UserSimulator and substitute it into the kwargs.
+        if "user_simulator_llm_config" in self.orchestrator_kwargs:
+            user_sim_llm_config = self.orchestrator_kwargs.pop("user_simulator_llm_config")
+            max_user_turns = self.orchestrator_kwargs.pop("max_user_turns", 20)
+            if not self.config.scenario:
+                raise ValueError(
+                    "multiturn_react orchestrator requires a `scenario` field on the task "
+                    "config (use vibrantlabsai/enterprise-ops-gym-plus or another multi-turn-aware "
+                    "dataset that provides scenario.{domain, reason_for_call, known_info, task_instructions})."
+                )
+            self._initialize_user_sim_llm(user_sim_llm_config)
+            from user_simulator.simulator import UserSimulator
+            self.orchestrator_kwargs["user_simulator"] = UserSimulator(
+                llm_client=self.user_sim_llm_client,
+                scenario=self.config.scenario,
+                max_user_turns=max_user_turns,
+            )
+
         logger.info("✅ Initialization complete")
 
     def _initialize_planner_llm(self, planner_llm_config: "LLMConfig") -> None:
@@ -156,6 +175,31 @@ class BenchmarkExecutor:
             stop_after_attempt=3,
         )
         logger.info(f"✅ Planner initialized: {planner_llm_config.llm_provider}/{planner_llm_config.llm_model}")
+
+    def _initialize_user_sim_llm(self, user_sim_llm_config: "LLMConfig") -> None:
+        """Initialize user-simulator LLM client with retry. Sets self.user_sim_llm_client."""
+        logger.info("Initializing user-simulator LLM...")
+        self.user_sim_llm_client = LLMClient(
+            provider=user_sim_llm_config.llm_provider,
+            model=user_sim_llm_config.llm_model,
+            api_key=user_sim_llm_config.llm_api_key,
+            api_endpoint=user_sim_llm_config.llm_api_endpoint,
+            api_version=user_sim_llm_config.llm_api_version,
+            region=user_sim_llm_config.llm_region,
+            temperature=user_sim_llm_config.temperature,
+            max_tokens=user_sim_llm_config.max_tokens,
+            top_p=user_sim_llm_config.top_p,
+            effort=user_sim_llm_config.effort,
+            reasoning=user_sim_llm_config.reasoning,
+        )
+        self.user_sim_llm_client.llm = self.user_sim_llm_client.llm.with_retry(
+            retry_if_exception_type=(Exception,),
+            wait_exponential_jitter=True,
+            stop_after_attempt=3,
+        )
+        logger.info(
+            f"✅ User-simulator initialized: {user_sim_llm_config.llm_provider}/{user_sim_llm_config.llm_model}"
+        )
 
     def _parse_gym_configs(self) -> List[Dict[str, Any]]:
         """Parse gym configurations from config, supporting both multi-gym and legacy formats"""
@@ -523,11 +567,16 @@ class BenchmarkExecutor:
 
             # Calculate statistics
             statistics = self._calculate_statistics(all_runs)
+            is_multiturn = "user_simulator" in self.orchestrator_kwargs
             result = {
                 "benchmark_config": {
                     "model": f"{self.llm_config.llm_provider}/{self.llm_config.llm_model}",
                     "number_of_runs": self.config.number_of_runs,
-                    "user_prompt": self.config.user_prompt,
+                    "user_prompt": (
+                        self.config.scenario
+                        if is_multiturn and self.config.scenario
+                        else self.config.user_prompt
+                    ),
                     "gym_servers": [
                         {
                             "name": g["mcp_server_name"],
