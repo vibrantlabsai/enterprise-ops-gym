@@ -241,8 +241,49 @@ python evaluate.py \
 | `react` | Standard ReAct loop |
 | `planner_react` | Planner generates a plan; executor follows it |
 | `decomposing` | Decomposes task into sub-goals before executing |
+| `multiturn_react` | ReAct loop with an LLM user-simulator on the other end of the conversation |
 
 For `planner_react` / `decomposing`, add `--planner_llm_config conf/llm/<planner>.json`.
+
+---
+
+### Option C — Multi-turn (ReAct + user simulator)
+
+`multiturn_react` evaluates the agent against an LLM playing the **user** role, instead of receiving the full task prompt up-front. The user-sim sees the scenario's `reason_for_call`, `known_info`, and `task_instructions` and reveals them progressively as the agent asks. The conversation ends when the user-sim emits `##STOP##` or `--max_user_turns` is hit.
+
+Any plain-text content from the agent is routed to the user-sim; tool calls execute against the MCP servers as in single-turn ReAct.
+
+**Required flags:**
+- `--orchestrator multiturn_react`
+- `--user_simulator_llm_config conf/llm/<user-sim>.json` — the LLM that plays the user (can be the same model as the agent or a smaller/cheaper one)
+- `--max_user_turns <N>` — cap on agent↔user round-trips per task (default `20`)
+
+```bash
+python evaluate.py \
+    --hf_dataset ServiceNow-AI/EnterpriseOps-Gym \
+    --domain itsm --mode oracle \
+    --llm_config conf/llm/claude-sonnet-4-6.json \
+    --user_simulator_llm_config conf/llm/user-sim.json \
+    --output_folder results/multiturn_react/claude-sonnet-4-6/itsm/oracle \
+    --orchestrator multiturn_react \
+    --max_user_turns 20 \
+    --concurrency 5 --num_runs 1
+```
+
+The user-sim config uses the same schema as any other LLM config. A higher temperature (~0.7) gives more natural variation; `max_tokens` of 512–1024 is enough since replies are short:
+
+```json
+{
+    "llm_provider": "aws_bedrock",
+    "llm_model": "us.anthropic.claude-sonnet-4-6",
+    "llm_api_key": "",
+    "llm_region": "us-east-1",
+    "temperature": 0.7,
+    "max_tokens": 1024
+}
+```
+
+Scoring works the same way as the single-turn orchestrators (`compute_score.py` reads `verification_results` from each task file). Expect lower scores than `react` on the same dataset: the agent has to extract task details from conversation rather than a single prompt, which surfaces real-world failure modes (missed prerequisites, wrong argument literals under noise).
 
 ---
 
