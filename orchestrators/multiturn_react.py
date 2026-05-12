@@ -1,18 +1,20 @@
 """Multi-turn ReAct orchestrator with a user simulator.
 
-Extends :class:`ReactOrchestrator` with two surgical changes:
-- The opening user message is ``scenario.reason_for_call`` (from the
-  user simulator), not the god's-eye ``user_prompt``.
-- A synthetic ``send_message_to_user`` tool is exposed; calls to it are
-  routed to the user simulator instead of an MCP server.
+Replaces single-turn ReAct's termination rule (``no tool calls = done``)
+with a conversational one: any plain-text portion of the agent's response
+is routed to the user simulator, and the loop continues until the user
+emits ``##STOP##`` (or the simulator's turn budget is exhausted).
 
-The base ReAct loop (no-tool-call termination, max_iterations,
-message-history accumulation) is inherited unchanged.
+There is no synthetic ``send_message_to_user`` tool — the agent just
+speaks, and the orchestrator delivers. Tool calls and user-facing text
+can coexist in a single response: tool calls execute first (Bedrock
+requires tool_use → tool_result adjacency), then the text (if any) is
+routed to the simulator.
 """
 
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
@@ -22,48 +24,37 @@ from .react import ReactOrchestrator
 logger = logging.getLogger(__name__)
 
 
-SEND_MESSAGE_TO_USER_TOOL_NAME = "send_message_to_user"
-
-
-SEND_MESSAGE_TO_USER_TOOL = {
-    "name": SEND_MESSAGE_TO_USER_TOOL_NAME,
-    "description": (
-        "Send a message to the user and receive their reply. Use this to ask "
-        "clarifying questions, request missing information, or confirm task "
-        "completion before ending the conversation. The reply field contains "
-        "the user's response. If stop_emitted=true, the user has indicated the "
-        "task is complete (or wants to stop) — you should typically finish up "
-        "and end your turn shortly after."
-    ),
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "message": {
-                "type": "string",
-                "description": "What you want to say to the user.",
-            }
-        },
-        "required": ["message"],
-    },
-    "_synthetic": True,
-}
-
-
 SYSTEM_PROMPT_USER_INTERACTION_SUFFIX = (
     "\n\n## MULTI-TURN MODE — overrides earlier rules where they conflict\n"
     "A real user is on the other end of this conversation. The earlier rule "
     "*Do not ask for further information* is suspended in this mode and is "
     "REPLACED by the rules below.\n\n"
-    f"- Use the `{SEND_MESSAGE_TO_USER_TOOL_NAME}` tool whenever a required detail "
-    "is missing or ambiguous. The user only volunteers information when asked.\n"
-    "- You MUST make at least one tool call on every turn until the task is fully "
-    "complete. Never end a turn with a plain-text response that says what you "
-    "*will* do — actually call the tool. If you need information, call "
-    f"`{SEND_MESSAGE_TO_USER_TOOL_NAME}`. If you have enough information, call the "
-    "appropriate domain tool.\n"
-    f"- End the conversation only after every step is verifiably done and the "
-    "user has confirmed (or after `stop_emitted=true` is returned by the user).\n"
+    "- Any plain-text content you produce IS delivered to the user. Write it "
+    "in first person, addressed to them — not as internal narration. If you "
+    "need a missing detail, just ask the user directly in your text.\n"
+    "- Tool calls are executed against the underlying systems. You may emit "
+    "text and tool calls in the same turn; both happen.\n"
+    "- The user will signal when they consider the task complete. Until then, "
+    "keep working — don't end with a passive summary if real actions are "
+    "still required.\n"
 )
+
+
+def _extract_text(content: Any) -> str:
+    """Pull text out of a LangChain/Bedrock response ``content`` field.
+
+    Bedrock Converse returns either a plain string or a list of content
+    blocks like ``[{"type": "text", "text": "..."}, {"type": "tool_use", ...}]``.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", "") or "")
+        return "".join(parts)
+    return ""
 
 
 class MultiTurnReactOrchestrator(ReactOrchestrator):
@@ -73,24 +64,16 @@ class MultiTurnReactOrchestrator(ReactOrchestrator):
         super().__init__(*args, **kwargs)
         self.user_simulator = user_simulator
 
-        # Ensure the synthetic user-talk tool is registered on the tools array.
-        # Idempotent — execute_single_run constructs a new orchestrator per run
-        # against the same available_tools list, so guard against duplicates.
-        if not any(
-            t.get("name") == SEND_MESSAGE_TO_USER_TOOL_NAME
-            for t in self.available_tools
-        ):
-            self.available_tools.append(dict(SEND_MESSAGE_TO_USER_TOOL))
-
-        # Augment the agent's system prompt so it knows the tool exists and how
-        # to use it. Idempotent across reconstruction.
-        if SEND_MESSAGE_TO_USER_TOOL_NAME not in (self.config.system_prompt or ""):
+        # Augment the agent's system prompt so it knows there's a user on the
+        # other end. Idempotent across reconstruction.
+        if "MULTI-TURN MODE" not in (self.config.system_prompt or ""):
             self.config.system_prompt = (
                 (self.config.system_prompt or "") + SYSTEM_PROMPT_USER_INTERACTION_SUFFIX
             )
 
     async def execute(self) -> Dict[str, Any]:
-        """Run the ReAct loop with the user simulator opening the conversation."""
+        """Run the loop. Termination: user-sim STOP, sim budget exceeded,
+        defensive empty-response, or ``max_iterations``."""
         opener = await self.user_simulator.opening_message()
 
         messages = [
@@ -106,8 +89,8 @@ class MultiTurnReactOrchestrator(ReactOrchestrator):
                 "source": "user_simulator",
             },
         ]
-        tools_used = []
-        tool_results = []
+        tools_used: List[str] = []
+        tool_results: List[Dict[str, Any]] = []
 
         for iteration in range(self.max_iterations):
             logger.info(f"\n--- Iteration {iteration + 1} ---")
@@ -149,11 +132,9 @@ class MultiTurnReactOrchestrator(ReactOrchestrator):
 
             logger.info(f"LLM Response: {response.content}")
 
-            if not response.tool_calls or len(response.tool_calls) == 0:
-                logger.info("No tool calls requested. Task complete.")
-                break
-
-            for tool_call in response.tool_calls:
+            # 1) Execute tool calls first. Bedrock requires every tool_use
+            #    block to be immediately followed by its tool_result.
+            for tool_call in response.tool_calls or []:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["args"]
 
@@ -193,6 +174,43 @@ class MultiTurnReactOrchestrator(ReactOrchestrator):
                     }
                 )
 
+            # 2) Route any plain-text content to the user simulator.
+            text = _extract_text(response.content)
+            if text.strip():
+                sim_result = await self.user_simulator.respond(text)
+                if sim_result.get("error"):
+                    logger.error(
+                        f"User simulator returned error; ending conversation: "
+                        f"{sim_result['error']}"
+                    )
+                    break
+
+                user_reply = sim_result["reply"]
+                messages.append(HumanMessage(content=user_reply))
+                conversation_flow.append(
+                    {
+                        "type": "user_message",
+                        "content": user_reply,
+                        "source": "user_simulator",
+                        "stop_emitted": sim_result["stop"],
+                        "budget_exceeded": sim_result["budget_exceeded"],
+                    }
+                )
+
+                if sim_result["stop"]:
+                    logger.info("User simulator emitted ##STOP##; ending conversation.")
+                    break
+                if sim_result["budget_exceeded"]:
+                    logger.info("User simulator turn budget exceeded; ending conversation.")
+                    break
+            elif not response.tool_calls:
+                # No text, no tools — defensive exit. Should not happen with
+                # Bedrock, but if it does we'd loop forever otherwise.
+                logger.info(
+                    "LLM response had neither text nor tool calls; ending conversation."
+                )
+                break
+
         return {
             "final_response": messages[-1].content if messages else "",
             "conversation_flow": conversation_flow,
@@ -200,29 +218,6 @@ class MultiTurnReactOrchestrator(ReactOrchestrator):
             "tool_results": tool_results,
             "messages": messages,
         }
-
-    async def _execute_tool_call(
-        self, tool_name: str, tool_args: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Route ``send_message_to_user`` to the user simulator; otherwise
-        delegate to the MCP-routing logic in the base class."""
-        if tool_name == SEND_MESSAGE_TO_USER_TOOL_NAME:
-            agent_msg = tool_args.get("message", "") or ""
-            sim_result = await self.user_simulator.respond(agent_msg)
-            success = sim_result.get("error") is None
-            wrapped = {
-                "success": success,
-                "result": {
-                    "reply": sim_result["reply"],
-                    "stop_emitted": sim_result["stop"],
-                    "budget_exceeded": sim_result["budget_exceeded"],
-                },
-            }
-            if not success:
-                wrapped["error"] = sim_result["error"]
-            return {"result": wrapped, "gym_server": "user_simulator"}
-
-        return await super()._execute_tool_call(tool_name, tool_args)
 
     def get_result_metadata(self) -> Dict[str, Any]:
         return {
