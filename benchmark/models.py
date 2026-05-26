@@ -85,6 +85,23 @@ class BenchmarkConfig:
     # Expected keys: domain, reason_for_call, known_info, task_instructions.
     scenario: Optional[Dict[str, str]] = None
 
+    # ------------------------------------------------------------------
+    # Axis 2: unintended DB writes detection (opt-in).
+    # See benchmark/axis2_verifier.py.
+    #   compute_axis_2:    flip to true to run the row-level diff each run.
+    #   golden_tool_calls: per-task list of {tool_name, arguments[, gym_name]}
+    #                     describing the canonical correct write sequence.
+    #                     Required when compute_axis_2 is true; otherwise the
+    #                     verifier emits skipped="no_golden".
+    #   axis_2_config:    optional knobs — tables allow-list, ignored_columns,
+    #                     severity_overrides, default_severity. See module doc.
+    # NOTE: If this field ever appears as a JSON-serialized string in a HF
+    # dataset row, add "golden_tool_calls" to json_string_fields in evaluate.py.
+    # ------------------------------------------------------------------
+    compute_axis_2: bool = False
+    golden_tool_calls: Optional[List[Dict[str, Any]]] = None
+    axis_2_config: Optional[Dict[str, Any]] = None
+
 
 @dataclass
 class LLMConfig:
@@ -94,7 +111,7 @@ class LLMConfig:
     llm_api_endpoint: Optional[str] = ""
     llm_api_version: Optional[str] = ""
     llm_region: Optional[str] = None
-    temperature: float = 0.0
+    temperature: Optional[float] = 0.0
     max_tokens: int = 4096
     top_p: Optional[float] = None
     effort: Optional[str] = None

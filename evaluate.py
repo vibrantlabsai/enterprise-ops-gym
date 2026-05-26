@@ -311,7 +311,7 @@ async def main():
         domains = args.domain
         modes = args.mode
         tmp_dir = tempfile.mkdtemp(prefix="rl_gym_hf_")
-        json_string_fields = {"gym_servers_config", "verifiers", "scenario"}
+        json_string_fields = {"gym_servers_config", "verifiers", "scenario", "golden_tool_calls"}
         hf_only_fields = {"task_id", "domain"}
         total_written = 0
         for mode in modes:

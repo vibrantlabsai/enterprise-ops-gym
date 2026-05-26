@@ -392,6 +392,36 @@ class BenchmarkExecutor:
             if client:
                 client.database_id = db_id
 
+        # Axis 2 (opt-in): seed a second "golden" DB per gym from the same
+        # seed file. We don't replay golden tool calls yet — that happens
+        # after the agent's run so the live MCPClient (used by both flows)
+        # isn't juggling two database_ids in flight. We just provision and
+        # track for cleanup here.
+        golden_db_by_gym: Dict[str, str] = {}
+        if self.config.compute_axis_2:
+            for gym_conf in self.gym_configs:
+                gid = create_database_from_file(
+                    gym_conf["mcp_server_url"], gym_conf["seed_database_file"]
+                )
+                if gid:
+                    golden_db_by_gym[gym_conf["mcp_server_name"]] = gid
+                    # Piggyback on the existing benchmark-wide cleanup list so
+                    # golden DBs are dropped in the finally block at the end
+                    # of execute_benchmark(), even if this run crashes.
+                    self.auto_created_databases.append(
+                        {
+                            "gym_name": gym_conf["mcp_server_name"],
+                            "gym_url": gym_conf["mcp_server_url"],
+                            "database_id": gid,
+                        }
+                    )
+                else:
+                    logger.warning(
+                        "Axis 2: failed to seed golden DB for gym '%s'; the "
+                        "block will be marked skipped='golden_seed_failed'.",
+                        gym_conf["mcp_server_name"],
+                    )
+
         # Execute the main task via the configured orchestrator
         orchestrator = self.orchestrator_class(
             llm_client=self.llm_client,
@@ -442,6 +472,16 @@ class BenchmarkExecutor:
         }
 
         result.update(orchestrator.get_result_metadata())
+
+        # ------------------------------------------------------------------
+        # Axis 2: unintended DB writes (opt-in).
+        # Attaches a top-level "axis_2_unintended_changes" block to the run
+        # result. Never raises; never affects overall_success.
+        # ------------------------------------------------------------------
+        if self.config.compute_axis_2:
+            result["axis_2_unintended_changes"] = await self._compute_axis_2(
+                golden_db_by_gym
+            )
 
         logger.info(f"\nRUN {run_number} COMPLETED")
         logger.info(
@@ -522,6 +562,67 @@ class BenchmarkExecutor:
             #     logger.warning(f"Failure reason: {result.get('error') or result.get('details')}")
 
         return verification_results
+
+    async def _compute_axis_2(
+        self, golden_db_by_gym: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """Run the Axis 2 unintended-changes verifier for this run.
+
+        Returns the block to attach to the run dict under
+        ``axis_2_unintended_changes``. Always returns a block; on failure
+        modes the block carries ``skipped`` + ``error`` and an empty
+        ``violations`` list. Never raises.
+        """
+        # Local import keeps the optional dependency out of the hot path
+        # for runs that don't enable Axis 2.
+        from benchmark.axis2_verifier import Axis2Verifier
+
+        golden_calls = self.config.golden_tool_calls or []
+        if not golden_calls:
+            logger.warning(
+                "Axis 2 is enabled (compute_axis_2=true) but the task has no "
+                "golden_tool_calls — emitting skipped='no_golden'."
+            )
+            return {
+                "count": 0,
+                "weighted_count": 0.0,
+                "violations": [],
+                "skipped": "no_golden",
+            }
+
+        if not golden_db_by_gym:
+            return {
+                "count": 0,
+                "weighted_count": 0.0,
+                "violations": [],
+                "skipped": "golden_seed_failed",
+                "error": "no golden databases were seeded for any gym",
+            }
+
+        agent_db_by_gym = {
+            g["mcp_server_name"]: g["database_id"]
+            for g in self.gym_configs
+            if g.get("database_id")
+        }
+
+        axis2 = Axis2Verifier(
+            self.mcp_clients,
+            self.tool_to_server_mapping,
+            self.config.axis_2_config,
+        )
+        try:
+            return await axis2.run(
+                agent_db_by_gym, golden_db_by_gym, golden_calls
+            )
+        except Exception as e:
+            logger.exception("Axis 2 verifier crashed")
+            return {
+                "count": 0,
+                "weighted_count": 0.0,
+                "violations": [],
+                "skipped": "axis_2_internal_error",
+                "error": str(e),
+            }
 
     async def execute_benchmark(self) -> Dict[str, Any]:
         """Execute complete benchmark with multiple runs"""
@@ -677,7 +778,7 @@ class BenchmarkExecutor:
         for tool in all_tools:
             tool_counts[tool] = tool_counts.get(tool, 0) + 1
 
-        return {
+        stats: Dict[str, Any] = {
             "total_runs": total_runs,
             "successful_runs": len(successful_runs),
             "overall_success_rate": overall_success_rate,
@@ -689,3 +790,22 @@ class BenchmarkExecutor:
             "mean_execution_time_ms": mean_time,
             "tool_usage": tool_counts,
         }
+
+        # Axis 2 rollup (only when at least one run emitted the block).
+        axis2_runs: List[Dict[str, Any]] = []
+        for r in runs:
+            blk = r.get("axis_2_unintended_changes")
+            if isinstance(blk, dict):
+                axis2_runs.append(blk)
+        if axis2_runs:
+            counts = [a.get("count", 0) for a in axis2_runs]
+            weighted = [a.get("weighted_count", 0.0) for a in axis2_runs]
+            stats["axis_2_summary"] = {
+                "mean_count": sum(counts) / len(counts),
+                "mean_weighted_count": sum(weighted) / len(weighted),
+                "total_violations": sum(counts),
+                "runs_with_violations": sum(1 for c in counts if c > 0),
+                "runs_skipped": sum(1 for a in axis2_runs if "skipped" in a),
+            }
+
+        return stats
