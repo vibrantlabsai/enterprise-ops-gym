@@ -73,6 +73,9 @@ class LLMClient:
                 self.llm = ChatBedrockConverse(**bedrock_kwargs)
             elif self.provider == "openai":
                 from langchain_openai import ChatOpenAI
+                from langchain_core.caches import BaseCache  # noqa: F401
+                from langchain_core.callbacks import Callbacks  # noqa: F401
+                ChatOpenAI.model_rebuild()
 
                 self.llm = ChatOpenAI(
                     model=self.model,
@@ -120,6 +123,9 @@ class LLMClient:
                 )
             elif self.provider == "vllm" or self.provider == "openrouter":
                 from langchain_openai import ChatOpenAI
+                from langchain_core.caches import BaseCache  # noqa: F401
+                from langchain_core.callbacks import Callbacks  # noqa: F401
+                ChatOpenAI.model_rebuild()
 
                 model_kwargs = {}
                 if self.top_p is not None:
