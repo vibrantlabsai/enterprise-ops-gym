@@ -43,6 +43,7 @@ Axis 2.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -58,6 +59,8 @@ DEFAULT_IGNORED_COLUMNS = [
     "created_at",
     "updated_at",
     "modified_at",
+    "created_on",
+    "updated_on",
     "sys_updated_on",
     "sys_created_on",
     "sys_mod_count",
@@ -292,13 +295,26 @@ class Axis2Verifier:
         # be defensive).
         for table in set(agent_snap) | set(golden_snap):
             pk_cols = pk_map.get(table) or []
-            if not pk_cols:
-                # No stable key → can't diff this table meaningfully. Skip.
-                logger.debug("Axis 2: skipping table %s (no PK)", table)
-                continue
-
             ignored = default_ignored | set(ignored_cfg.get(table, []))
             severity = float(severity_overrides.get(table, default_sev))
+
+            if not pk_cols:
+                # No PRAGMA-visible PK → fall back to whole-row identity so the
+                # table is still diffed. Seed dumps are INSERT-only and many
+                # schemas carry no declared PK; skipping these outright turned
+                # Axis 2 into a no-op (every table excluded → always 0). A value
+                # change on an existing row surfaces as one delete + one insert
+                # (there is no key to pair them), which is fine for over-action.
+                violations.extend(
+                    self._keyless_diff(
+                        table,
+                        agent_snap.get(table, []),
+                        golden_snap.get(table, []),
+                        ignored,
+                        severity,
+                    )
+                )
+                continue
 
             agent_rows = {self._row_key(r, pk_cols): r for r in agent_snap.get(table, [])}
             golden_rows = {self._row_key(r, pk_cols): r for r in golden_snap.get(table, [])}
@@ -374,6 +390,69 @@ class Axis2Verifier:
         if len(key) == 1:
             return str(key[0])
         return "|".join("" if k is None else str(k) for k in key)
+
+    # ---- keyless (no-PK) fallback -------------------------------------
+
+    @staticmethod
+    def _value_sig(v: Any) -> Any:
+        """Hashable, comparable form of a cell value."""
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            return v
+        return json.dumps(v, sort_keys=True, default=str)
+
+    @classmethod
+    def _row_signature(
+        cls, row: Dict[str, Any], ignored: set
+    ) -> Tuple[Tuple[str, Any], ...]:
+        """Order-independent signature of a row over its non-ignored columns."""
+        return tuple(
+            sorted((c, cls._value_sig(v)) for c, v in row.items() if c not in ignored)
+        )
+
+    @staticmethod
+    def _sig_key(sig: Tuple[Tuple[str, Any], ...]) -> str:
+        return "row:" + hashlib.md5(repr(sig).encode()).hexdigest()[:10]
+
+    def _keyless_diff(
+        self,
+        table: str,
+        agent_rows: List[Dict[str, Any]],
+        golden_rows: List[Dict[str, Any]],
+        ignored: set,
+        severity: float,
+    ) -> List[Dict[str, Any]]:
+        """Whole-row multiset diff for tables with no usable primary key.
+
+        Rows seeded identically into both DBs cancel out; only the divergence
+        between the agent's writes and the golden replay's writes remains.
+        Counter difference handles duplicate rows correctly.
+        """
+        from collections import Counter
+
+        agent_ct = Counter(self._row_signature(r, ignored) for r in agent_rows)
+        golden_ct = Counter(self._row_signature(r, ignored) for r in golden_rows)
+
+        out: List[Dict[str, Any]] = []
+        for sig, n in (agent_ct - golden_ct).items():  # extra in agent → insert
+            cols = [c for c, v in sig if v is not None]
+            for _ in range(n):
+                out.append({
+                    "table": table,
+                    "row_key": self._sig_key(sig),
+                    "op": "insert",
+                    "extra_columns": cols,
+                    "severity": severity,
+                })
+        for sig, n in (golden_ct - agent_ct).items():  # missing in agent → delete
+            for _ in range(n):
+                out.append({
+                    "table": table,
+                    "row_key": self._sig_key(sig),
+                    "op": "delete",
+                    "extra_columns": [],
+                    "severity": severity,
+                })
+        return out
 
     @staticmethod
     def _skipped(reason: str, error: Optional[str]) -> Dict[str, Any]:

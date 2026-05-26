@@ -599,10 +599,16 @@ class BenchmarkExecutor:
                 "error": "no golden databases were seeded for any gym",
             }
 
+        # The agent's live database_id is held on each MCP client (set during
+        # gym prep via `client.database_id = db_id`); self.gym_configs[*]
+        # ["database_id"] is NOT reliably back-filled and is often "" here,
+        # which previously made agent_db_by_gym empty → the diff loop never ran
+        # → Axis 2 silently reported 0 violations on every task. Read the id
+        # from the clients, which is what the verifier's SQL calls use anyway.
         agent_db_by_gym = {
-            g["mcp_server_name"]: g["database_id"]
-            for g in self.gym_configs
-            if g.get("database_id")
+            name: client.database_id
+            for name, client in self.mcp_clients.items()
+            if getattr(client, "database_id", None)
         }
 
         axis2 = Axis2Verifier(
