@@ -1,58 +1,36 @@
 <div align="center">
 
-<h1><img src="assets/csmgym.png" alt="EnterpriseOps-Gym Logo" width="48" style="vertical-align:middle; margin-right:10px;" /> EnterpriseOps-Gym: Environments and Evaluations for Stateful Agentic Planning and Tool Use in Enterprise Settings</h1>
+<h1>EnterpriseOps-Gym</h1>
 
 <p>
-  <a href="https://enterpriseops-gym.github.io/"><img src="https://img.shields.io/badge/Website-green?logo=googlechrome&logoColor=white" /></a>
-  <a href="https://arxiv.org/abs/2603.13594"><img src="https://img.shields.io/badge/Paper-blue?logo=arxiv&logoColor=white" /></a>
-<a href="https://huggingface.co/datasets/ServiceNow-AI/EnterpriseOps-Gym"><img src="https://img.shields.io/badge/🤗_Dataset-yellow" /></a>
-  <a href="https://github.com/ServiceNow/EnterpriseOps-Gym/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey" /></a>
+  <a href="https://huggingface.co/datasets/vibrantlabsai/enterprise-ops-gym-plus"><img src="https://img.shields.io/badge/🤗_Dataset-yellow" /></a>
+  <img src="https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey" />
 </p>
 
-<p><i>EnterpriseOps-Gym is a containerized, resettable enterprise simulation benchmark for evaluating LLM agents on stateful, multi-step planning and tool use across realistic enterprise workflows</i></p>
+<p><i>A containerized, resettable enterprise simulation for evaluating LLM agents on stateful, multi-step planning and tool use — single-turn, multi-turn (with a user simulator), and unintended-change detection.</i></p>
 
-<p><b>Authors</b></p>
-
-<p><small>
-  Shiva Krishna Reddy Malay<sup>*,1</sup> &nbsp;&nbsp;
-Shravan Nayak<sup>*,1,2,3</sup> &nbsp;&nbsp;
-Jishnu Sethumadhavan Nair<sup>1</sup> &nbsp;&nbsp;
-Aman Tiwari<sup>1</sup> &nbsp;&nbsp;
-Sathwik Tejaswi Madhusudhan<sup>1</sup> &nbsp;&nbsp;
-Sagar Davasam<sup>1</sup> &nbsp;&nbsp;
-Sridhar Krishna Nemala<sup>1</sup> &nbsp;&nbsp;
-Srinivas Sunkara<sup>1</sup> &nbsp;&nbsp;
-Sai Rajeswar<sup>1,2,3</sup>
-</small></p>
-
-<p>
-  <sup>*</sup>Equal contribution &nbsp;|&nbsp;
-  <sup>1</sup>ServiceNow AI Research &nbsp;|&nbsp;
-  <sup>2</sup>Mila – Quebec AI Institute &nbsp;|&nbsp;
-  <sup>3</sup>Université de Montréal
-</p>
+<p><sub>Forked from the EnterpriseOps-Gym benchmark.</sub></p>
 
 </div>
 
 ---
 
-## 📖 Introduction
+## 📖 Overview
 
-**EnterpriseOps-Gym** evaluates LLM agents on **1,150 expert-curated tasks** across **8 enterprise domains** — Calendar, CSM, Drive, Email, HR, ITSM, Teams, and Hybrid — in a fully interactive, containerized environment.
+EnterpriseOps-Gym runs agent tasks against **live MCP servers** backed by per-task SQLite databases that are **seeded fresh and reset between runs**. Tasks are graded by **SQL verifiers that check the final environment state** — not the action sequence — so an agent is free to reach the goal however it likes.
 
-Unlike static datasets, tasks run against live MCP servers and are evaluated by SQL verifiers that check **final environment state**, not action sequences.
+This fork adds two evaluation surfaces on top of the standard single-turn ReAct loop:
 
-**Key Features:**
+- **Multi-turn (ReAct + user simulator).** Instead of receiving the whole task up front, the agent converses with an LLM that plays the **user**, who discloses details progressively as the agent asks.
+- **Axis 2 — unintended-change detection.** A row-level **database state diff** against a golden replay that flags writes the agent made *beyond* what the task required.
 
-- 🛠️ **512 tools** across 8 enterprise domains
-- 🗄️ **164 database tables** with avg 1.7 foreign-key dependencies per table
-- 🔢 **9.15 avg steps** per task (up to 34), with **5.3 avg verification conditions**
-- 📏 **89k avg context length** per task
-- 🏆 Best model achieves only **34.1%** success rate — significant headroom for improvement
+Three things are graded independently:
 
-<div align="center">
-<img src="assets/teaser.png" alt="EnterpriseOps-Gym Overview" width="100%" />
-</div>
+| Surface | Question it answers | How |
+|---|---|---|
+| Verifiers (Axis 1) | Did the required things happen? | SQL predicates over the final DB |
+| Multi-turn | Can the agent gather the task through dialogue? | LLM user simulator + the same verifiers |
+| Axis 2 | Did anything **extra** happen? | DB row diff vs. a golden replay |
 
 ---
 
@@ -61,9 +39,10 @@ Unlike static datasets, tasks run against live MCP servers and are evaluated by 
 - [⚙️ Installation](#️-installation)
 - [🔧 Prerequisites](#-prerequisites)
 - [🚀 Running the Benchmark](#-running-the-benchmark)
+- [💬 Multi-turn (ReAct + user simulator)](#-multi-turn-react--user-simulator)
+- [🧬 Axis 2 — unintended-change detection](#-axis-2--unintended-change-detection)
 - [📊 Scoring](#-scoring)
-- [🏆 Leaderboard](#-leaderboard)
-- [📚 Citation](#-citation)
+- [🙏 Acknowledgements](#-acknowledgements)
 
 ---
 
@@ -72,8 +51,8 @@ Unlike static datasets, tasks run against live MCP servers and are evaluated by 
 Requires **Python 3.11+** and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/ServiceNow/EnterpriseOps-Gym.git
-cd EnterpriseOps-Gym
+git clone https://github.com/vibrantlabsai/enterprise-ops-gym.git
+cd enterprise-ops-gym
 
 # Install with only the provider(s) you need
 uv sync --extra anthropic    # Claude / AWS Bedrock
@@ -130,17 +109,16 @@ Default ports:
 | Domain | MCP Server | Port |
 |--------|-----------|------|
 | `teams` | `gym-teams-mcp` | 8002 |
-| `csm` | `sn-csm-server` | 8001 |
+| `csm` | `gym-csm-server` | 8001 |
 | `email` | `gym-email-mcp` | 8004 |
 | `itsm` | `gym-itsm-mcp` | 8006 |
 | `calendar` | `gym-calendar` | 8003 |
-| `hr` | `sn-hr-internal` | 8008 |
+| `hr` | `gym-hr-internal` | 8008 |
 | `drive` | `gym-google-drive-mcp` | 8009 |
-| `<container_port>` | N/A | 8005 |
 
-Update `conf/ray/domain_conf.json` if you use non-default ports. For `calendar` use 8003 as the container_port. 
+Update `conf/ray/domain_conf.json` if you use non-default ports. For `calendar` use 8003 as the container_port.
 
-### 2. LLM Config
+### 3. LLM Config
 
 LLM configs live in `conf/llm/<name>.json`. Use an array for load-balanced pools.
 
@@ -148,13 +126,12 @@ LLM configs live in `conf/llm/<name>.json`. Use an array for load-balanced pools
 |-------|----------|-------------|
 | `llm_provider` | ✅ | `anthropic`, `aws_bedrock`, `openai`, `azureopenai`, `googlevertexai`, `google`, `vllm`, `openrouter`, `deepseek`, `qwq` |
 | `llm_model` | ✅ | Model identifier |
-| `llm_api_key` | ✅ | API key |
+| `llm_api_key` | ✅ | API key (may be empty for providers that read credentials from the environment, e.g. AWS Bedrock) |
 | `llm_api_endpoint` | — | Required for Azure OpenAI / vLLM |
 | `llm_api_version` | — | Required for Azure OpenAI |
 | `llm_region` | — | Region for `aws_bedrock` / `googlevertexai` |
-| `temperature` | — | Default `0.0` |
+| `temperature` | — | Default `0.0`; set `null` to omit it for models that reject a custom temperature |
 | `max_tokens` | — | Default `4096` |
-| `reasoning` | - | Reasoning Parameters |
 
 ```json
 {
@@ -172,7 +149,9 @@ LLM configs live in `conf/llm/<name>.json`. Use an array for load-balanced pools
 
 ## 🚀 Running the Benchmark
 
-### Option A — Ray *(recommended)*
+A run reads task configs from either a HuggingFace dataset (`--hf_dataset` with `--mode` = config name and `--domain` = split) or a local folder (`--configs_folder`). Each task becomes one `BenchmarkConfig`.
+
+### Option A — Ray *(recommended for batch runs)*
 
 Ray orchestrates parallel runs across models and domains.
 
@@ -182,7 +161,7 @@ Ray orchestrates parallel runs across models and domains.
 {
     "llms": ["gpt-4.1-mini", "gemini_2p5"],
     "domains": ["teams", "csm", "email"],
-    "modes": ["oracle", "plus_5_tools", "plus_10_tools", "plus_15_tools"],
+    "modes": ["oracle"],
     "orchestrator": "react",
     "num_runs": 1,
     "num_llm_instances": 1,
@@ -194,11 +173,7 @@ Ray orchestrates parallel runs across models and domains.
 }
 ```
 
-Per-model task concurrency is set in `conf/ray/llm_concurrency.json` (defaults to 5):
-
-```json
-{ "gpt-4.1-mini": 4, "gemini_2p5": 4 }
-```
+Per-model task concurrency is set in `conf/ray/llm_concurrency.json` (defaults to 5).
 
 **2. Run:**
 
@@ -206,32 +181,18 @@ Per-model task concurrency is set in `conf/ray/llm_concurrency.json` (defaults t
 python ray_experiment_queue.py --experiment_config conf/ray/experiment.json
 ```
 
----
+### Option B — Direct (single-turn ReAct)
 
-### Option B — Direct
-
-Run a single domain/mode without Ray. **Use this option for the `hybrid` domain.**
+Run a single domain/mode without Ray:
 
 ```bash
 python evaluate.py \
-    --hf_dataset ServiceNow-AI/EnterpriseOps-Gym \
-    --domain teams --mode oracle \
-    --llm_config conf/llm/gpt-4.1-mini.json \
-    --output_folder results/react/gpt-4.1-mini/teams/oracle \
+    --hf_dataset vibrantlabsai/enterprise-ops-gym-plus \
+    --domain itsm --mode oracle \
+    --llm_config conf/llm/my-model.json \
+    --output_folder results/react/my-model/itsm/oracle \
     --orchestrator react \
     --concurrency 4 --num_runs 1
-```
-
-For hybrid tasks:
-
-```bash
-python evaluate.py \
-    --hf_dataset ServiceNow-AI/EnterpriseOps-Gym \
-    --domain hybrid --mode oracle \
-    --llm_config conf/llm/gpt-4.1-mini.json \
-    --output_folder results/react/gpt-4.1-mini/hybrid/oracle \
-    --orchestrator react \
-    --concurrency 2 --num_runs 1
 ```
 
 **Orchestrators:**
@@ -240,37 +201,57 @@ python evaluate.py \
 |-------|-------------|
 | `react` | Standard ReAct loop |
 | `planner_react` | Planner generates a plan; executor follows it |
-| `decomposing` | Decomposes task into sub-goals before executing |
-| `multiturn_react` | ReAct loop with an LLM user-simulator on the other end of the conversation |
+| `decomposing` | Decomposes the task into sub-goals before executing |
+| `multiturn_react` | ReAct loop with an LLM user simulator on the other end (see below) |
 
 For `planner_react` / `decomposing`, add `--planner_llm_config conf/llm/<planner>.json`.
 
 ---
 
-### Option C — Multi-turn (ReAct + user simulator)
+## 💬 Multi-turn (ReAct + user simulator)
 
-`multiturn_react` evaluates the agent against an LLM playing the **user** role, instead of receiving the full task prompt up-front. The user-sim sees the scenario's `reason_for_call`, `known_info`, and `task_instructions` and reveals them progressively as the agent asks. The conversation ends when the user-sim emits `##STOP##` or `--max_user_turns` is hit.
+`multiturn_react` evaluates the agent against an LLM playing the **user** role, instead of handing it the full task prompt up front. The agent has to *extract* the task through conversation — which surfaces real-world failure modes (missed prerequisites, wrong argument literals under noise, not asking for required fields). Tool calls still execute against the MCP servers exactly as in single-turn ReAct; any plain-text the agent produces is delivered to the user simulator.
 
-Any plain-text content from the agent is routed to the user-sim; tool calls execute against the MCP servers as in single-turn ReAct.
+**How it works** (`orchestrators/multiturn_react.py`, `user_simulator/simulator.py`):
+
+- Each task row carries a **`scenario`** object:
+
+  ```json
+  {
+    "domain": "itsm",
+    "reason_for_call": "why the user is reaching out (revealed first, paraphrased)",
+    "known_info": "facts the user holds and shares only when asked",
+    "task_instructions": "behavioral direction: pacing, what to withhold, when to stop"
+  }
+  ```
+
+- The user simulator **discloses information progressively** — one piece at a time, only when the agent asks — and **never fabricates** anything outside the scenario.
+- Its system prompt is an editable plain-text file, `user_simulator/user_sim_system_prompt.txt`, loaded at build time with the scenario appended (`user_simulator/prompts.py::build_user_simulator_prompt`). Tune behavior by editing the file — no code change.
+- The conversation ends when the user emits a control token or the turn budget is hit:
+  - **`###STOP###`** — the user considers the task complete.
+  - **`###OUT-OF-SCOPE###`** — the scenario does not contain the information needed to continue (e.g. the agent demands an identifier the user was never given).
 
 **Required flags:**
+
 - `--orchestrator multiturn_react`
-- `--user_simulator_llm_config conf/llm/<user-sim>.json` — the LLM that plays the user (can be the same model as the agent or a smaller/cheaper one)
+- `--user_simulator_llm_config conf/llm/<user-sim>.json` — the LLM that plays the user (can match the agent or be a smaller/cheaper model)
 - `--max_user_turns <N>` — cap on agent↔user round-trips per task (default `20`)
+
+The task row **must have a `scenario` column**. The `vibrantlabsai/enterprise-ops-gym-plus` config **`qwen-3.6-27B-multiturn`** ships scenarios whose `task_instructions` were derived empirically from agent rollouts:
 
 ```bash
 python evaluate.py \
-    --hf_dataset ServiceNow-AI/EnterpriseOps-Gym \
-    --domain itsm --mode oracle \
-    --llm_config conf/llm/claude-sonnet-4-6.json \
+    --hf_dataset vibrantlabsai/enterprise-ops-gym-plus \
+    --domain itsm --mode qwen-3.6-27B-multiturn \
+    --llm_config conf/llm/my-model.json \
     --user_simulator_llm_config conf/llm/user-sim.json \
-    --output_folder results/multiturn_react/claude-sonnet-4-6/itsm/oracle \
+    --output_folder results/multiturn_react/my-model/itsm \
     --orchestrator multiturn_react \
     --max_user_turns 20 \
     --concurrency 5 --num_runs 1
 ```
 
-The user-sim config uses the same schema as any other LLM config. A higher temperature (~0.7) gives more natural variation; `max_tokens` of 512–1024 is enough since replies are short:
+The user-sim config uses the same schema as any other LLM config. A higher temperature (~0.7) gives more natural variation; `max_tokens` of 512–1024 is plenty since replies are short:
 
 ```json
 {
@@ -283,7 +264,59 @@ The user-sim config uses the same schema as any other LLM config. A higher tempe
 }
 ```
 
-Scoring works the same way as the single-turn orchestrators (`compute_score.py` reads `verification_results` from each task file). Expect lower scores than `react` on the same dataset: the agent has to extract task details from conversation rather than a single prompt, which surfaces real-world failure modes (missed prerequisites, wrong argument literals under noise).
+Scoring is identical to the single-turn orchestrators. Expect **lower** scores than `react` on the same tasks — the agent now has to earn the task details through dialogue.
+
+---
+
+## 🧬 Axis 2 — unintended-change detection
+
+The standard `database_state` verifiers (**Axis 1**) answer *"did the required things happen?"*. **Axis 2** answers the complementary question — *"did anything **extra** happen?"* — by diffing the agent's final database against a **golden replay** of the canonical solution.
+
+**Mechanism** (`benchmark/axis2_verifier.py`, `benchmark/executor.py::_compute_axis_2`), per gym, per run:
+
+1. The executor seeds a **second "golden" database** from the same seed file as the agent's DB.
+2. After the agent runs, the task's `golden_tool_calls` are **replayed** against the golden DB (re-using the MCP client pointed at the golden `database_id`).
+3. Both DBs are snapshotted (`SELECT * FROM <table>`), primary keys are discovered server-side (`sqlite_master` + `PRAGMA table_info`).
+4. Rows are diffed **by primary key** → `insert` (extra row in agent DB), `delete` (missing row), `update` (changed columns), with timestamp-like columns ignored by default.
+
+**Enable it** on a task config:
+
+```json
+{
+    "compute_axis_2": true,
+    "golden_tool_calls": [
+        {"tool_name": "update_incident",
+         "arguments": {"incident_id": "INC_004", "status": "in_progress"},
+         "gym_name": "gym-itsm-mcp"}
+    ],
+    "axis_2_config": {
+        "tables": ["incident", "notification"],
+        "ignored_columns": {"_default": ["created_at", "updated_at"], "incident": ["sys_mod_count"]},
+        "default_severity": 1.0,
+        "severity_overrides": {"notification": 0.5}
+    }
+}
+```
+
+- `golden_tool_calls` — required when `compute_axis_2` is true (the write sequence to replay).
+- `axis_2_config` — optional knobs: a `tables` allow-list, per-table `ignored_columns` (extends the timestamp defaults), and severity weights.
+
+**Output.** A top-level `axis_2_unintended_changes` block is attached to each run, alongside `verification_results`:
+
+```json
+{
+  "count": 1,
+  "weighted_count": 1.0,
+  "violations": [
+    {"table": "incident", "row_key": "INC_009", "op": "update",
+     "extra_columns": ["assigned_to"], "severity": 1.0}
+  ]
+}
+```
+
+If the verifier can't run end-to-end it emits a `"skipped": "<reason>"` (and `"error"`) block instead. **Axis 2 never affects `overall_success`** — it is a separate signal for measuring over-action.
+
+> The per-task `golden_tool_calls` can be authored by hand or extracted from passing solver runs with the repo's golden-extraction tooling.
 
 ---
 
@@ -291,10 +324,10 @@ Scoring works the same way as the single-turn orchestrators (`compute_score.py` 
 
 ```bash
 # Single run
-python compute_score.py --results_folder results/react/gpt-4.1-mini/teams/oracle
+python compute_score.py --results_folder results/react/my-model/itsm/oracle
 
 # All modes at once
-python compute_score.py --results_folder results/react/gpt-4.1-mini/teams
+python compute_score.py --results_folder results/react/my-model/itsm
 ```
 
 Output:
@@ -305,73 +338,16 @@ Output:
 +================+===============+=================+======================+=======================+
 | oracle         | 100           | 0               | 72.00                | 68.50                 |
 +----------------+---------------+-----------------+----------------------+-----------------------+
-| plus_5_tools   | 100           | 0               | 65.00                | 61.20                 |
-+----------------+---------------+-----------------+----------------------+-----------------------+
 ```
 
 - **Avg Success Rate** — tasks where *all* verifiers passed
 - **Avg Verifier Pass** — average per-verifier pass rate
 - **Files w/ Errors** — agent errors; excluded from averages
 
+`compute_score.py` reads `verification_results` from each task file, so it works the same across all orchestrators. The `axis_2_unintended_changes` block is reported separately and does not enter the success rate.
+
 ---
 
-## 🏆 Leaderboard
+## 🙏 Acknowledgements
 
-Task success rate (%) on Oracle mode on the full benchmark. A task passes only if **all** verification conditions are met.
-
-| Model | Teams | CSM | Email | ITSM | Calendar | HR | Drive | Hybrid | **Avg** |
-|-------|:-----:|:---:|:-----:|:----:|:--------:|:--:|:-----:|:------:|:-------:|
-| **Closed Source** | | | | | | | | | |
-| Claude Opus 4.6 | **52.0** | 45.1 | 57.7 | 33.3 | **43.3** | **45.1** | **57.1** | **34.0** | **45.9** |
-| Claude Sonnet 4.6 | 47.0 | 32.6 | **58.6** | **35.5** | 40.4 | 37.0 | 57.1 | 29.4 | 42.2 |
-| Claude Opus 4.5 | 50.0 | 34.2 | 51.9 | 23.8 | 43.2 | 32.1 | 49.5 | 30.7 | 39.4 |
-| Gemini-3.1-Pro | 46.0 | **46.7** | 47.1 | 32.8 | 40.4 | 10.9 | 55.2 | 30.1 | 38.7 |
-| Claude Sonnet 4.5 | 51.0 | 16.7 | 51.3 | 17.6 | 34.6 | 21.6 | 52.1 | 28.1 | 34.1 |
-| Gemini-3-Flash | 47.3 | 35.0 | 44.3 | 28.5 | 30.5 | 12.6 | 49.7 | 24.2 | 34.0 |
-| Gemini-3-Pro | 43.0 | 27.7 | 33.6 | 22.2 | 28.8 | 12.5 | 46.7 | 22.9 | 29.7 |
-| GPT-5 | 26.3 | 36.4 | 49.0 | 18.9 | 41.3 | 17.9 | 34.0 | 23.5 | 30.9 |
-| GPT-5-Mini | 25.7 | 15.8 | 47.4 | 8.9 | 28.8 | 10.7 | 23.8 | 22.5 | 22.9 |
-| Gemini-2.5-Pro | 39.3 | 11.6 | 31.1 | 13.9 | 12.5 | 4.9 | 27.0 | 19.6 | 20.0 |
-| **Open Source** | | | | | | | | | |
-| DeepSeek-V3.2 | 35.7 | 15.4 | 45.8 | 9.6 | 21.5 | 15.0 | 27.6 | 22.9 | 24.2 |
-| Kimi-K2-Thinking | 30.0 | 7.1 | 51.0 | 12.2 | 15.4 | 8.2 | 39.6 | 15.7 | 22.4 |
-| Qwen3-30B (Think) | 22.0 | 5.4 | 51.9 | 6.7 | 18.3 | 7.6 | 25.7 | 15.7 | 19.1 |
-| Qwen3-235B (Inst.) | 28.0 | 4.7 | 38.1 | 9.3 | 15.7 | 7.8 | 23.8 | 17.7 | 18.1 |
-| Qwen3-4B (Think) | 24.0 | 3.8 | 38.4 | 5.6 | 5.8 | 7.1 | 21.9 | 15.8 | 15.3 |
-
-### Public split:
-We release 60% of the benchmark samples in the public split. For completeness, we present the evaluation results limited to the public split samples below:
-
-| Model | Teams | CSM | Email | ITSM | Calendar | HR | Drive | Hybrid | **Avg.** |
-|-------|:-----:|:---:|:-----:|:----:|:--------:|:--:|:-----:|:------:|:--------:|
-| ***Closed Source Models*** | | | | | | | | | |
-| Claude Opus 4.5 | 50.8 | 29.7 | 47.8 | 28.2 | 41.0 | 32.4 | 46.9 | 30.7 | 36.6 |
-| Gemini-3-Flash | 50.8 | 25.7 | 47.8 | 26.2 | 23.0 | 17.6 | 53.1 | 22.7 | 31.2 |
-| GPT-5.2 (High) | 27.9 | 28.7 | 52.2 | 22.3 | 34.4 | 22.5 | 37.5 | 20.5 | 29.4 |
-| Claude Sonnet 4.5 | 54.1 | 15.8 | 46.3 | 22.3 | 36.1 | 22.5 | 54.7 | 25.0 | 31.7 |
-| GPT-5 | 23.0 | 30.7 | 55.2 | 18.4 | 37.7 | 16.7 | 34.4 | 21.6 | 28.1 |
-| Gemini-3-Pro | 45.9 | 21.8 | 29.9 | 24.3 | 24.6 | 14.7 | 42.2 | 23.9 | 26.7 |
-| GPT-5.2 (Low) | 24.6 | 17.8 | 41.8 | 7.8 | 26.2 | 6.9 | 23.4 | 20.5 | 19.3 |
-| GPT-5-Mini | 23.0 | 16.8 | 52.2 | 5.8 | 31.1 | 6.9 | 21.9 | 21.8 | 22.0 |
-| ***Open Source Models*** | | | | | | | | | |
-| DeepSeek-V3.2 (High) | 41.0 | 12.9 | 44.8 | 18.4 | 21.3 | 19.6 | 37.5 | 23.9 | 25.5 |
-| GPT-OSS-120B (High) | 37.7 | 19.8 | 43.3 | 6.8 | 24.6 | 17.6 | 45.3 | 19.3 | 24.4 |
-| Kimi-K2-Thinking | 29.5 | 6.9 | 46.3 | 15.5 | 11.5 | 8.8 | 32.8 | 12.5 | 18.5 |
-| Qwen3-30B (Think) | 21.3 | 5.0 | 53.7 | 8.7 | 18.0 | 8.8 | 26.6 | 11.4 | 17.0 |
-| Qwen3-235B (Inst.) | 29.5 | 4.0 | 41.8 | 10.7 | 23.0 | 14.7 | 31.2 | 19.3 | 19.6 |
-| Qwen3-4B (Think) | 23.0 | 3.0 | 37.3 | 5.8 | 4.9 | 7.8 | 23.4 | 15.9 | 13.6 |
----
-
-## 📚 Citation
-
-```bibtex
-@misc{malay2026enterpriseopsgymenvironmentsevaluationsstateful,
-      title={EnterpriseOps-Gym: Environments and Evaluations for Stateful Agentic Planning and Tool Use in Enterprise Settings}, 
-      author={Shiva Krishna Reddy Malay and Shravan Nayak and Jishnu Sethumadhavan Nair and Sagar Davasam and Aman Tiwari and Sathwik Tejaswi Madhusudhan and Sridhar Krishna Nemala and Srinivas Sunkara and Sai Rajeswar},
-      year={2026},
-      eprint={2603.13594},
-      archivePrefix={arXiv},
-      primaryClass={cs.AI},
-      url={https://arxiv.org/abs/2603.13594}, 
-}
-```
+Built on the **EnterpriseOps-Gym** benchmark. Released under **CC BY-NC 4.0**.
