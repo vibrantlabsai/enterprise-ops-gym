@@ -3,7 +3,8 @@
 Replaces single-turn ReAct's termination rule (``no tool calls = done``)
 with a conversational one: any plain-text portion of the agent's response
 is routed to the user simulator, and the loop continues until the user
-emits ``##STOP##`` (or the simulator's turn budget is exhausted).
+emits ``###STOP###`` or ``###OUT-OF-SCOPE###`` (or the simulator's turn
+budget is exhausted).
 
 There is no synthetic ``send_message_to_user`` tool — the agent just
 speaks, and the orchestrator delivers. Tool calls and user-facing text
@@ -81,7 +82,7 @@ class MultiTurnReactOrchestrator(ReactOrchestrator):
             HumanMessage(content=opener),
         ]
 
-        conversation_flow = [
+        conversation_flow: List[Dict[str, Any]] = [
             {"type": "system_message", "content": self.config.system_prompt},
             {
                 "type": "user_message",
@@ -193,12 +194,18 @@ class MultiTurnReactOrchestrator(ReactOrchestrator):
                         "content": user_reply,
                         "source": "user_simulator",
                         "stop_emitted": sim_result["stop"],
+                        "out_of_scope": sim_result.get("out_of_scope", False),
                         "budget_exceeded": sim_result["budget_exceeded"],
                     }
                 )
 
+                if sim_result.get("out_of_scope"):
+                    logger.info(
+                        "User simulator emitted ###OUT-OF-SCOPE###; ending conversation."
+                    )
+                    break
                 if sim_result["stop"]:
-                    logger.info("User simulator emitted ##STOP##; ending conversation.")
+                    logger.info("User simulator emitted ###STOP###; ending conversation.")
                     break
                 if sim_result["budget_exceeded"]:
                     logger.info("User simulator turn budget exceeded; ending conversation.")
@@ -224,4 +231,5 @@ class MultiTurnReactOrchestrator(ReactOrchestrator):
             "multiturn": True,
             "user_simulator_calls": self.user_simulator.turn_count,
             "user_stop_emitted": self.user_simulator.stop_emitted,
+            "user_out_of_scope_emitted": self.user_simulator.out_of_scope_emitted,
         }

@@ -20,7 +20,8 @@ from user_simulator.prompts import build_user_simulator_prompt
 logger = logging.getLogger(__name__)
 
 
-STOP_SENTINEL = "##STOP##"
+STOP_SENTINEL = "###STOP###"
+OUT_OF_SCOPE_SENTINEL = "###OUT-OF-SCOPE###"
 
 
 class UserSimulator:
@@ -44,6 +45,7 @@ class UserSimulator:
         self.max_user_turns = max_user_turns
         self.turn_count = 0
         self.stop_emitted = False
+        self.out_of_scope_emitted = False
         self.system_prompt = build_user_simulator_prompt(scenario)
         self.messages: List[Any] = [SystemMessage(content=self.system_prompt)]
         self._opened = False
@@ -72,14 +74,14 @@ class UserSimulator:
             "is usually right. Paraphrase your motivation in your own words — "
             "do NOT quote the scenario verbatim. Do NOT list everything you "
             "know upfront; only say what's prompting you to reach out. Do "
-            "not include `##STOP##` in this opening turn."
+            "not include `###STOP###` in this opening turn."
         ))
 
         text: str = ""
         try:
             response = await self.llm_client.llm.ainvoke(self.messages + [elicit])
             text = (getattr(response, "content", "") or "").strip()
-            text = text.replace(STOP_SENTINEL, "").strip()
+            text = text.replace(STOP_SENTINEL, "").replace(OUT_OF_SCOPE_SENTINEL, "").strip()
         except Exception:
             logger.exception(
                 "User simulator opener generation failed; falling back to "
@@ -110,34 +112,46 @@ class UserSimulator:
             return {
                 "reply": "[user-budget-exceeded]",
                 "stop": True,
+                "out_of_scope": False,
                 "budget_exceeded": True,
                 "error": None,
             }
 
-        self.messages.append(HumanMessage(content=agent_message))
-
         try:
-            response = await self.llm_client.llm.ainvoke(self.messages)
+            response = await self.llm_client.llm.ainvoke(
+                self.messages + [HumanMessage(content=agent_message)]
+            )
         except Exception as e:
             logger.exception("User simulator LLM call failed")
             return {
                 "reply": "[user-simulator-error]",
                 "stop": True,
+                "out_of_scope": False,
                 "budget_exceeded": False,
                 "error": str(e),
             }
 
+        self.messages.append(HumanMessage(content=agent_message))
         text = getattr(response, "content", "") or ""
         self.messages.append(AIMessage(content=text))
 
         stop = STOP_SENTINEL in text
+        out_of_scope = OUT_OF_SCOPE_SENTINEL in text
         if stop:
             self.stop_emitted = True
             text = text.replace(STOP_SENTINEL, "").strip()
+        if out_of_scope:
+            self.out_of_scope_emitted = True
+            text = text.replace(OUT_OF_SCOPE_SENTINEL, "").strip()
 
+        # Out-of-scope is a distinct termination reason (the scenario lacks the
+        # info needed to continue) but, like STOP, it ends the conversation — so
+        # we set `stop` to drive the existing orchestrator exit path while
+        # surfacing `out_of_scope` separately for logging/metrics.
         return {
             "reply": text,
-            "stop": stop,
+            "stop": stop or out_of_scope,
+            "out_of_scope": out_of_scope,
             "budget_exceeded": False,
             "error": None,
         }
