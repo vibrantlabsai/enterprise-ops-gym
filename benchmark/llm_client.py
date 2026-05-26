@@ -18,7 +18,7 @@ class LLMClient:
         api_endpoint: Optional[str] = None,
         api_version: Optional[str] = None,
         region: Optional[str] = None,
-        temperature: float = 0.0,
+        temperature: Optional[float] = 0.0,
         max_tokens: int = 4096,
         top_p: Optional[float] = None,
         effort: Optional[str] = None,
@@ -63,12 +63,14 @@ class LLMClient:
                 from langchain_core.callbacks import Callbacks  # noqa: F401
                 ChatBedrockConverse.model_rebuild()
 
-                self.llm = ChatBedrockConverse(
-                    model=self.model,
-                    region_name=self.region or "us-west-2",
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
+                bedrock_kwargs: Dict[str, Any] = {
+                    "model": self.model,
+                    "region_name": self.region or "us-west-2",
+                    "max_tokens": self.max_tokens,
+                }
+                if self.temperature is not None:
+                    bedrock_kwargs["temperature"] = self.temperature
+                self.llm = ChatBedrockConverse(**bedrock_kwargs)
             elif self.provider == "openai":
                 from langchain_openai import ChatOpenAI
 

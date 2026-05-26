@@ -1,3 +1,4 @@
+*.json
 conf/
 data/
 Domain Wise DBs and Task-DB Mappings/
